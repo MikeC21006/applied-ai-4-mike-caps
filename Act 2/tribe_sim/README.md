@@ -57,7 +57,8 @@ Each gatherer in your evolving tribe has five genetic traits:
 - **Game Mode** (`--game`): Small populations, visually engaging, easy to follow individual gatherers
 - **High-Data Mode** (`--high-data`, default): Large populations, less visual detail, better statistical data
 
-**Important:** Use high-data mode for your assignments! While game mode is more fun to watch, high-data mode with 100 gatherers per tribe will show the effectiveness of your genetic algorithm much more clearly. The larger sample size makes evolutionary trends more apparent and statistical differences more meaningful.
+**Important:** Use high-data mode for your assignments! While game mode is more fun to watch, high-data mode with 100 gatherers per tribe will show the effectiveness of your 
+genetic algorithm much more clearly. The larger sample size makes evolutionary trends more apparent and statistical differences more meaningful.
 
 ---
 
