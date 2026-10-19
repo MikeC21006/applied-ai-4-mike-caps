@@ -14,6 +14,8 @@ This agent currently makes terrible decisions:
 Students should replace the naive methods with proper optimization algorithms.
 """
 
+from multiprocessing import managers
+
 import numpy as np
 from typing import Dict, Optional
 from .standardized_agents import BaselineAgent
@@ -34,7 +36,7 @@ class SkeletonOptimizationAgent(BaselineAgent):
         self.name = "StudentOptimization"
         
         # Enable unlimited hiring for true economic optimization
-        self.env._unlimited_hiring = True
+        self.env._unlimited_hiring = False
         
         # Students can add their own state tracking here
         self.performance_metrics = []
@@ -80,60 +82,156 @@ class SkeletonOptimizationAgent(BaselineAgent):
         
         return action
     
-    def _get_naive_staffing_action(self, financial_state, employee_info) -> int:
-        """
-        WEEK 2 STEP 1: Staffing decisions - students should improve this!
-        
-        Current problems:
-        - Ignores queue length and workload
-        - Random decisions regardless of profit
-        - No consideration of employee efficiency
-        """
-        
-        # TODO WEEK 2 STEP 1: Students should implement intelligent staffing logic
-        # Current approach: Make random decisions based on "vibes"
-        
-        current_profit = financial_state[0]
-        num_employees = np.sum(employee_info[:, 0] > 0)  # Count active employees
-        
-        # Terrible logic: Random decisions with slight bias
-        # BUT: Hire managers more frequently so layout optimization can work
-        has_manager = np.any(employee_info[:, 5] == 1)  # Check if we have a manager
-        
-        if np.random.random() < 0.3:  # 30% chance to hire
-            if num_employees < 20:  # Don't go completely overboard
-                return 1  # Hire worker
-        elif np.random.random() < 0.1:  # 10% chance to fire
-            if num_employees > 1:  # Don't fire everyone
-                return 2  # Fire worker
-        elif np.random.random() < 0.2:  # 20% chance to hire manager (increased from 5%)
-            if not has_manager or num_employees > 10:  # Hire manager if we don't have one, or if we have lots of workers
-                return 3  # Hire manager
-        
-        return 0  # No action
+    def _get_naive_staffing_action(self, financial_state, employee_info):
+
+        workers = sum(
+            1 for employee in self.env.employees
+            if not employee.is_manager
+        )
+
+        managers = sum(
+            1 for employee in self.env.employees
+            if employee.is_manager
+        )
+
+        if workers < 5:
+            return 1
+
+        if managers == 0:
+            return 3
+
+        return 0
+    
     
     def _get_naive_layout_action(self, current_timestep) -> list:
-        """
-        WEEK 1 STEP 1: Layout optimization - students should improve this!
-        
-        Current problems:
-        - Random swaps with no strategic purpose
-        - Ignores item co-occurrence patterns
-        - No consideration of delivery distances
-        - Wastes manager time on pointless moves
-        """
-        
-        # TODO WEEK 1 STEP 1: Students should implement intelligent layout optimization
-        # Current approach: Occasionally make random swaps
-        
-        if current_timestep % 100 == 0 and np.random.random() < 0.2:  # Random timing
-            # Pick two random positions to swap
-            grid_size = self.env.grid_width * self.env.grid_height
-            pos1 = np.random.randint(0, grid_size)
-            pos2 = np.random.randint(0, grid_size)
-            return [pos1, pos2]
-        
-        return [0, 0]  # No swap
+        """Move frequently accessed items closer to the delivery area."""
+
+        if current_timestep % 100 != 0:
+            return [0, 0]
+
+        grid = self.env.warehouse_grid
+        frequencies = grid.item_access_frequency
+
+        if frequencies is None or len(frequencies) == 0:
+            return [0, 0]
+
+        frequency_values = np.asarray(frequencies).flatten()
+        hot_threshold = np.percentile(frequency_values, 75)
+
+        delivery_positions = getattr(
+            grid,
+            "truck_bay_positions",
+            [(grid.width // 2, grid.height // 2)]
+        )
+
+        best_swap = [0, 0]
+        best_improvement = 1
+
+        for item_id, frequency in enumerate(frequency_values):
+            if frequency < hot_threshold:
+                continue
+
+            item_locations = grid.find_item_locations(item_id)
+
+            if not item_locations:
+                continue
+
+            current_pos = item_locations[0]
+
+            current_distance = min(
+                abs(current_pos[0] - delivery[0])
+                + abs(current_pos[1] - delivery[1])
+                for delivery in delivery_positions
+            )
+
+            if current_distance <= 3:
+                continue
+
+            for y in range(grid.height):
+                for x in range(grid.width):
+
+                    if grid.cell_types[y, x] != 1:
+                        continue
+
+                    new_distance = min(
+                        abs(x - delivery[0]) + abs(y - delivery[1])
+                        for delivery in delivery_positions
+                    )
+
+                    improvement = current_distance - new_distance
+
+                    if improvement > best_improvement:
+                        current_index = (
+                            current_pos[1] * grid.width + current_pos[0]
+                        )
+                        target_index = y * grid.width + x
+
+                        best_improvement = improvement
+                        best_swap = [current_index, target_index]
+
+        if best_swap != [0, 0]:
+            return best_swap
+
+        return self._find_cooccurrence_swap()
+
+    
+    def _find_cooccurrence_swap(self):
+        """Find a swap that brings frequently ordered items closer together."""
+
+        grid = self.env.warehouse_grid
+        cooccurrence = grid.item_cooccurrence
+
+        best_swap = [0, 0]
+        best_benefit = 0
+
+        for item1 in range(grid.num_item_types):
+            for item2 in range(item1 + 1, grid.num_item_types):
+                frequency = cooccurrence[item1, item2]
+
+                if frequency < 3:
+                    continue
+
+            locations1 = grid.find_item_locations(item1)
+            locations2 = grid.find_item_locations(item2)
+
+            if not locations1 or not locations2:
+                continue
+
+            pos1 = locations1[0]
+            pos2 = locations2[0]
+
+            current_distance = grid.manhattan_distance(pos1, pos2)
+
+            if current_distance < 4:
+                    continue
+
+            for target_x, target_y in grid.storage_positions:
+                target_pos = (target_x, target_y)
+
+                if target_pos == pos1 or target_pos == pos2:
+                    continue
+
+                target_item = grid.get_item_at_position(target_x, target_y)
+
+                if target_item is None:
+                    continue
+
+                new_distance = grid.manhattan_distance(pos1, target_pos)
+                improvement = current_distance - new_distance
+
+                if improvement <= 0:
+                    continue
+
+                benefit = frequency * improvement
+
+                if benefit > best_benefit:
+                    current_index = pos2[1] * grid.width + pos2[0]
+                    target_index = target_y * grid.width + target_x
+
+                    best_benefit = benefit
+                    best_swap = [current_index, target_index]
+
+            return best_swap
     
     def _get_naive_order_assignments(self, queue_info, employee_info) -> list:
         """
