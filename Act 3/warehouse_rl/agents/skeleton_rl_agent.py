@@ -72,7 +72,7 @@ class SkeletonOptimizationAgent(BaselineAgent):
         employee_info = observation['employees']
         
         action = {
-            'staffing_action': self._get_naive_staffing_action(financial_state, employee_info),
+            'staffing_action': self._get_naive_staffing_action(financial_state, employee_info, current_timestep),
             'layout_swap': self._get_naive_layout_action(current_timestep),
             'order_assignments': self._get_naive_order_assignments(queue_info, employee_info)
         }
@@ -82,7 +82,16 @@ class SkeletonOptimizationAgent(BaselineAgent):
         
         return action
     
-    def _get_naive_staffing_action(self, financial_state, employee_info):
+    def _get_naive_staffing_action(self, financial_state, employee_info, current_timestep):
+        """Adjust staffing based on queue size and profit."""
+
+        # Make staffing decisions every 100 steps.
+        if current_timestep % 100 != 0:
+            return 0
+
+        queue_length = len(self.env.order_queue.orders)
+        total_employees = len(self.env.employees)
+        current_profit = float(financial_state[0])
 
         workers = sum(
             1 for employee in self.env.employees
@@ -94,14 +103,20 @@ class SkeletonOptimizationAgent(BaselineAgent):
             if employee.is_manager
         )
 
+        # Maintain at least 5 workers.
         if workers < 5:
             return 1
 
+        # Hire a manager if none exists.
         if managers == 0:
             return 3
 
+        # Add workers when the queue is too large.
+        if queue_length / max(1, total_employees) > 4:
+            if current_profit > 2000 and total_employees < self.env.max_employees:
+                return 1
+
         return 0
-    
     
     def _get_naive_layout_action(self, current_timestep) -> list:
         """Move frequently accessed items closer to the delivery area."""
@@ -191,73 +206,111 @@ class SkeletonOptimizationAgent(BaselineAgent):
                 if frequency < 3:
                     continue
 
-            locations1 = grid.find_item_locations(item1)
-            locations2 = grid.find_item_locations(item2)
+                locations1 = grid.find_item_locations(item1)
+                locations2 = grid.find_item_locations(item2)
 
-            if not locations1 or not locations2:
-                continue
-
-            pos1 = locations1[0]
-            pos2 = locations2[0]
-
-            current_distance = grid.manhattan_distance(pos1, pos2)
-
-            if current_distance < 4:
+                if not locations1 or not locations2:
                     continue
 
-            for target_x, target_y in grid.storage_positions:
-                target_pos = (target_x, target_y)
+                pos1 = locations1[0]
+                pos2 = locations2[0]
 
-                if target_pos == pos1 or target_pos == pos2:
+                current_distance = grid.manhattan_distance(pos1, pos2)
+
+                if current_distance < 4:
                     continue
 
-                target_item = grid.get_item_at_position(target_x, target_y)
+                for target_x, target_y in grid.storage_positions:
+                    target_pos = (target_x, target_y)
 
-                if target_item is None:
-                    continue
+                    if target_pos == pos1 or target_pos == pos2:
+                        continue
 
-                new_distance = grid.manhattan_distance(pos1, target_pos)
-                improvement = current_distance - new_distance
+                    target_item = grid.get_item_at_position(target_x, target_y)
 
-                if improvement <= 0:
-                    continue
+                    if target_item is None:
+                        continue
 
-                benefit = frequency * improvement
+                    new_distance = grid.manhattan_distance(pos1, target_pos)
+                    improvement = current_distance - new_distance
 
-                if benefit > best_benefit:
-                    current_index = pos2[1] * grid.width + pos2[0]
-                    target_index = target_y * grid.width + target_x
+                    if improvement <= 0:
+                        continue
 
-                    best_benefit = benefit
-                    best_swap = [current_index, target_index]
+                    benefit = frequency * improvement
 
-            return best_swap
+                    if benefit > best_benefit:
+                        current_index = pos2[1] * grid.width + pos2[0]
+                        target_index = target_y * grid.width + target_x
+
+                        best_benefit = benefit
+                        best_swap = [current_index, target_index]
+
+        return best_swap
     
     def _get_naive_order_assignments(self, queue_info, employee_info) -> list:
-        """
-        WEEK 2 STEP 2: Order assignment - students should improve this!
-        
-        Current problems:
-        - Ignores employee locations
-        - No consideration of order priority/value
-        - Random assignments regardless of efficiency
-        - Doesn't check if employees are actually available
-        """
-        
-        # TODO WEEK 2 STEP 2: Students should implement intelligent order assignment
-        # Current approach: Random assignments
-        
-        assignments = [0] * 20  # No assignments by default
-        
-        # Count how many employees we have (very naive)
-        num_employees = int(np.sum(employee_info[:, 0] > 0))
-        
-        # Randomly assign first few orders to first few employees
-        if num_employees > 0:
-            for i in range(min(3, num_employees)):  # Only assign 3 orders max
-                if np.random.random() < 0.6:  # 60% chance to assign
-                    assignments[i] = (i % num_employees) + 1  # Random employee
-        
+        """Assign pending orders to idle workers using item distance."""
+
+        assignments = [0] * 20
+        orders = self.env.order_queue.orders
+        employees = self.env.employees
+        grid = self.env.warehouse_grid
+
+        # Find idle workers who are not managers.
+        idle_workers = []
+
+        for employee_idx, employee in enumerate(employees):
+            state = str(employee.state).upper()
+
+            if not employee.is_manager and state.endswith("IDLE"):
+                idle_workers.append(employee_idx)
+
+        # Consider only pending orders, without changing queue order.
+        pending_orders = [
+            (order_idx, order)
+            for order_idx, order in enumerate(orders[:20])
+            if order.status == "pending"
+        ]
+
+        # Match each idle worker to the closest available pending order.
+        while idle_workers and pending_orders:
+            best_worker_idx = None
+            best_order_idx = None
+            best_distance = float("inf")
+
+            for worker_idx in idle_workers:
+                employee = employees[worker_idx]
+
+                for order_idx, order in pending_orders:
+                    closest_distance = float("inf")
+
+                    for item_type in order.items:
+                        for location in grid.find_item_locations(item_type):
+                            distance = grid.manhattan_distance(
+                                employee.position, location
+                            )
+
+                            if distance < closest_distance:
+                                closest_distance = distance
+
+                    if closest_distance < best_distance:
+                        best_distance = closest_distance
+                        best_worker_idx = worker_idx
+                        best_order_idx = order_idx
+
+            # Stop if no valid worker-order match was found.
+            if best_worker_idx is None or best_order_idx is None:
+                break
+
+            # Assignment slot corresponds to the order's queue index.
+            assignments[best_order_idx] = best_worker_idx + 1
+
+            idle_workers.remove(best_worker_idx)
+            pending_orders = [
+                pair for pair in pending_orders
+                if pair[0] != best_order_idx
+            ]
+
         return assignments
     
     def record_reward(self, reward: float):
